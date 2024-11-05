@@ -155,4 +155,18 @@ class PanoramaStitcher:
         x_min, y_min = np.floor(all_corners.min(axis=0)).astype(int)
         x_max, y_max = np.ceil(all_corners.max(axis=0)).astype(int)
 
-        translation_mat = np.array([[
+        translation_mat = np.array([[1, 0, -x_min], [0, 1, -y_min], [0, 0, 1]])
+        translated_H = translation_mat @ H
+
+        output_dim = (y_max - y_min, x_max - x_min)
+        warped_overlay = self.warp_image(base_img, overlay_img, translated_H, output_dim)
+
+        stitched_img = np.zeros((output_dim[0], output_dim[1], 3), dtype=base_img.dtype)
+        stitched_img[-y_min:-y_min + base_h, -x_min:-x_min + base_w] = base_img
+
+        mask1 = (stitched_img > 0).astype(np.float32)
+        mask2 = (warped_overlay > 0).astype(np.float32)
+        combined_mask = mask1 + mask2
+        safe_combined_mask = np.where(combined_mask == 0, 1, combined_mask)
+        stitched_img = (stitched_img * mask1 + warped_overlay * mask2) / safe_combined_mask
+        return np.nan_to_num(stitched_img).astype(np.uint8)
