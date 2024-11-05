@@ -14,96 +14,70 @@ class PanaromaStitcher:
         self.matcher = cv2.FlannBasedMatcher(index_params, search_params)
 
     def make_panaroma_for_images_in(self, path):
-        img_paths = glob.glob('{}/*.*'.format(path))
-        image_sequence = [cv2.imread(im_path) for im_path in img_paths]
-        result_img = image_sequence[0]
-        transform_matrices = []
+        image_paths = glob.glob('{}/*.*'.format(path))
 
-        for idx in range(1, len(image_sequence)):
-            keypoints1, desc1 = self.sift.detectAndCompute(result_img, None)
-            keypoints2, desc2 = self.sift.detectAndCompute(image_sequence[idx], None)
-            
-            if desc1 is None or desc2 is None:
-                logger.warning(f"No descriptors found in image {idx}. Skipping this pair.")
+        images = [cv2.imread(im_path) for im_path in image_paths]
+        stitched_image = images[0]
+        homography_matrix_list = []
+
+        for i in range(1, len(images)):
+            kp1, des1 = self.sift.detectAndCompute(stitched_image, None)
+            kp2, des2 = self.sift.detectAndCompute(images[i], None)
+            if des1 is None or des2 is None:
+                logger.warning(f"No descriptors found in image {i}. Skipping this pair.")
                 continue
-                
-            matched_pairs = self.matcher.knnMatch(desc1, desc2, k=2)
-            good_points = []
-            for match1, match2 in matched_pairs:
-                if match1.distance < 0.70 * match2.distance:
-                    good_points.append(match1)
-
-            if len(good_points) < 6:
-                logger.warning(f"Not enough good matches between image {idx} and image {idx-1}. Skipping this pair.")
+            knn_matches = self.matcher.knnMatch(des1, des2, k=2)
+            good_matches = []
+            for m, n in knn_matches:
+                if m.distance < 0.70 * n.distance:
+                    good_matches.append(m)
+            if len(good_matches) < 6:
+                logger.warning(f"Not enough good matches between image {i} and image {i-1}. Skipping this pair.")
                 continue
-                
-            points1 = np.float32([keypoints1[m.queryIdx].pt for m in good_points]).reshape(-1, 2)
-            points2 = np.float32([keypoints2[m.trainIdx].pt for m in good_points]).reshape(-1, 2)
+            pts1 = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 2)
+            pts2 = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 2)
 
-            transform_matrix = self.compute_homography_using_ransac(points2, points1)
-            if transform_matrix is None:
-                logger.warning(f"Failed to compute homography for image {idx} and image {idx-1}. Skipping this pair.")
+            H = self.compute_homography_using_ransac(pts2, pts1)
+            if H is None:
+                logger.warning(f"Failed to compute homography for image {i} and image {i-1}. Skipping this pair.")
                 continue
 
-            transform_matrices.append(transform_matrix)
-            result_img = self.inverse_warp(result_img, image_sequence[idx], transform_matrix)
+            homography_matrix_list.append(H)
+            stitched_image = self.inverse_warp(stitched_image, images[i], H)
 
-        return result_img, transform_matrices
+        return stitched_image, homography_matrix_list
 
-    import numpy as np
-
+    # Function to normalize points
     def normalize_points(self, pts):
-        
-        mean_x, mean_y = np.mean(pts, axis=0)
-        std_x, std_y = np.std(pts, axis=0)
-        
-        
-        if std_x < 1e-8:
-            std_x = 1e-8
-        if std_y < 1e-8:
-            std_y = 1e-8
-        
-        
-        scale_x = np.sqrt(2) / std_x
-        scale_y = np.sqrt(2) / std_y
-        
-        
-        T = np.array([
-            [scale_x, 0, -scale_x * mean_x],
-            [0, scale_y, -scale_y * mean_y],
-            [0, 0, 1]
-        ])
-        
-        
+        mean = np.mean(pts, axis=0)
+        std = np.std(pts, axis=0)
+        std[std < 1e-8] = 1e-8 
+        scale = np.sqrt(2) / std
+        T = np.array([[scale[0], 0, -scale[0]*mean[0]],
+                      [0, scale[1], -scale[1]*mean[1]],
+                      [0, 0, 1]])
         pts_homogeneous = np.hstack((pts, np.ones((pts.shape[0], 1))))
-        
-        
-        normalized_pts_homogeneous = (T @ pts_homogeneous.T).T
-        
-        return normalized_pts_homogeneous[:, :2], T
-
+        normalized_pts = (T @ pts_homogeneous.T).T
+        return normalized_pts[:, :2], T
 
     def direct_linear_transform(self, pts1, pts2):
         pts1_norm, T1 = self.normalize_points(pts1)
         pts2_norm, T2 = self.normalize_points(pts2)
-        
         A = []
         for i in range(len(pts1_norm)):
             x, y = pts1_norm[i]
             x_prime, y_prime = pts2_norm[i]
-            A.append([-x, -y, -1, 0, 0, 0, x*x_prime, y*x_prime, x_prime])
-            A.append([0, 0, 0, -x, -y, -1, x*y_prime, y*y_prime, y_prime])
-            
+            A.append([-x, -y, -1, 0, 0, 0, x * x_prime, y * x_prime, x_prime])
+            A.append([0, 0, 0, -x, -y, -1, x * y_prime, y * y_prime, y_prime])
         A = np.array(A)
-        
         try:
             U, S, Vt = np.linalg.svd(A)
-            H_norm = Vt[-1].reshape(3, 3)
-            H = np.linalg.inv(T2) @ H_norm @ T1
-            return H / H[2, 2]
         except np.linalg.LinAlgError:
             logger.warning("SVD did not converge. Returning None for homography.")
             return None
+        H_norm = Vt[-1].reshape(3, 3)
+        H = np.linalg.inv(T2) @ H_norm @ T1      
+        return H / H[2, 2]
 
     def compute_homography_using_ransac(self, pts1, pts2):
         max_iterations = 500  
@@ -126,10 +100,10 @@ class PanaromaStitcher:
 
             pts1_homogeneous = np.hstack((pts1, np.ones((pts1.shape[0], 1))))
             projected_pts2_homogeneous = (H_candidate @ pts1_homogeneous.T).T
-            
+
             projected_pts2_homogeneous[projected_pts2_homogeneous[:, 2] == 0, 2] = 1e-10
             projected_pts2 = projected_pts2_homogeneous[:, :2] / projected_pts2_homogeneous[:, 2, np.newaxis]
-            
+
             errors = np.linalg.norm(pts2 - projected_pts2, axis=1)
             inliers = np.where(errors < threshold)[0]
 
@@ -138,6 +112,7 @@ class PanaromaStitcher:
                 best_H = H_candidate
                 best_inliers = inliers
 
+            # Early stopping if enough inliers are found
             if len(inliers) > 0.7 * len(pts1):
                 break
 
@@ -215,10 +190,11 @@ class PanaromaStitcher:
         x_max, y_max = np.ceil(all_corners.max(axis=0)).astype(int)
 
         translation = np.array([[1, 0, -x_min],
-                              [0, 1, -y_min],
-                              [0, 0, 1]])
-                              
+                                [0, 1, -y_min],
+                                [0, 0, 1]])
+
         H_translated = translation @ H
+
         output_shape = (y_max - y_min, x_max - x_min)
         warped_img2 = self.warp_image(img1, img2, H_translated, output_shape)
         stitched_image = np.zeros((output_shape[0], output_shape[1], 3), dtype=img1.dtype)
@@ -226,8 +202,9 @@ class PanaromaStitcher:
 
         mask1 = (stitched_image > 0).astype(np.float32)
         mask2 = (warped_img2 > 0).astype(np.float32)
+
         combined_mask = mask1 + mask2
-        safe_combined_mask = np.where(combined_mask == 0, 1, combined_mask)
+        safe_combined_mask = np.where(combined_mask == 0, 1, combined_mask) 
         stitched_image = (stitched_image * mask1 + warped_img2 * mask2) / safe_combined_mask
         stitched_image = np.nan_to_num(stitched_image).astype(np.uint8)
 
