@@ -52,7 +52,7 @@ class PanaromaStitcher:
 
     import numpy as np
 
-    def normalize_points_with_matrix(self, pts):
+    def normalize_points(self, pts):
         
         mean_x, mean_y = np.mean(pts, axis=0)
         std_x, std_y = np.std(pts, axis=0)
